@@ -247,6 +247,11 @@ export interface ManhattanAuditEvent {
 
 /**
  * Entity name categories for filter dropdown
+ * Maps to MAO entity types:
+ * - Order: Order, OrderLine, OrderMilestone, OrderAdditional, OrderAttribute, OrderExtension1, OrderLineNote
+ * - Fulfillment: FulfillmentDetail, Allocation, ReleaseLine, OrderTrackingDetail, OrderTrackingInfo
+ * - Payment: Invoice, InvoiceLine, InvoiceLineChargeDetail, InvoiceLineTaxDetail, OrderLineTaxDetail
+ * - System: QuantityDetail (bulk system-generated events)
  */
 export type EntityNameCategory = 'All' | 'Order' | 'Fulfillment' | 'Payment' | 'System'
 
@@ -323,17 +328,30 @@ export interface TrackingShipment {
   events: TrackingEvent[]
   // Manhattan OMS enhanced fields
   status: ShipmentStatus
-  eta: string // DD/MM/YYYY format
-  shippedOn: string // DD/MM/YYYY format
+  eta: string // MM/DD/YYYY format (standardized)
+  shippedOn: string // MM/DD/YYYY format (standardized)
   relNo: string // Release order number
   shippedFrom: string // Origin store name
   subdistrict: string // Thai subdistrict name
   shipToAddress: ShipToAddress
   trackingUrl: string // External carrier tracking link
+  shippedItems?: ShippedItem[] // Optional shipped items list
+}
+
+/**
+ * Shipped item for tracking display
+ */
+export interface ShippedItem {
+  productName: string
+  sku: string
+  shippedQty: number
+  orderedQty: number
+  uom: string
 }
 
 /**
  * Product item for Click & Collect Ship to Store scenario
+ * @deprecated Use ShippedItem instead for consistency
  */
 export interface CCProductItem {
   productName: string

@@ -11,18 +11,17 @@
 
 "use client"
 
+import * as React from "react"
 import Image from "next/image"
 import { useRouter } from "next/navigation"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
-import { Separator } from "@/components/ui/separator"
 import {
   ArrowLeft,
   Package,
   Barcode,
-  Store,
   TrendingUp,
   AlertTriangle,
   ChevronRight,
@@ -32,6 +31,10 @@ import {
   Shield,
   Info,
   Minus,
+  Check,
+  Circle,
+  Tag,
+  Clock,
 } from "lucide-react"
 import {
   Tooltip,
@@ -41,8 +44,12 @@ import {
 } from "@/components/ui/tooltip"
 import { StockHistoryChart } from "./stock-history-chart"
 import { RecentTransactionsTable } from "./recent-transactions-table"
+import { AllocateByOrderTable } from "./allocate-by-order-table"
 import StockAvailabilityIndicator from "./inventory/stock-availability-indicator"
 import { StockByStoreTable } from "./inventory/stock-by-store-table"
+import { TransactionHistorySection } from "./inventory/transaction-history-section"
+import { useAllocateTransactions } from "@/hooks/use-allocate-transactions"
+import { useInventoryView } from "@/contexts/inventory-view-context"
 import {
   formatWarehouseCode,
   getStockStatusColor,
@@ -63,32 +70,7 @@ interface InventoryDetailViewProps {
   stockHistory: StockHistoryPoint[]
   transactions: StockTransaction[]
   onBack?: () => void
-}
-
-function getStatusBadgeVariant(status: string) {
-  switch (status) {
-    case "healthy":
-      return "bg-green-100 text-green-800"
-    case "low":
-      return "bg-yellow-100 text-yellow-800"
-    case "critical":
-      return "bg-red-100 text-red-800"
-    default:
-      return "bg-gray-100 text-gray-800"
-  }
-}
-
-function getStatusLabel(status: string) {
-  switch (status) {
-    case "healthy":
-      return "In Stock"
-    case "low":
-      return "Low Stock"
-    case "critical":
-      return "Out of Stock"
-    default:
-      return status
-  }
+  storeContext?: string // Store filter context - when set, hides Stock by Store section and filters transactions
 }
 
 export function InventoryDetailView({
@@ -96,8 +78,42 @@ export function InventoryDetailView({
   stockHistory,
   transactions,
   onBack,
+  storeContext,
 }: InventoryDetailViewProps) {
   const router = useRouter()
+
+  // Get channels from inventory view context
+  const { channels: viewChannels } = useInventoryView()
+
+  // Fetch allocate-by-order transactions
+  const {
+    data: allocateTransactions,
+    loading: allocateLoading,
+    error: allocateError,
+    refetch: refetchAllocate,
+  } = useAllocateTransactions(item.id)
+
+  // Filter transactions by store context when provided
+  // Import the store-to-warehouse mapping function at the top of the file
+  const filteredTransactions = React.useMemo(() => {
+    if (!storeContext) {
+      return transactions
+    }
+
+    // Lazy import to avoid circular dependencies
+    const { getWarehouseCodesForStore } = require("@/lib/mock-inventory-data")
+    const warehouseCodes = getWarehouseCodesForStore(storeContext)
+
+    // If no warehouse codes found for store, return all transactions (failsafe)
+    if (warehouseCodes.length === 0) {
+      return transactions
+    }
+
+    // Filter transactions to only show those from warehouses associated with this store
+    return transactions.filter(t =>
+      t.warehouseCode && warehouseCodes.includes(t.warehouseCode)
+    )
+  }, [storeContext, transactions])
 
   // Calculate stock percentage
   const stockPercentage = (item.currentStock / item.maxStockLevel) * 100
@@ -129,54 +145,68 @@ export function InventoryDetailView({
       <Card>
         <CardHeader>
           <div className="flex flex-col md:flex-row gap-6">
-            {/* Product Image */}
+            {/* Product Image - Smaller with dark background fallback */}
             <div className="flex-shrink-0">
-              <div className="relative w-full md:w-[400px] h-[400px] rounded-lg overflow-hidden border bg-muted">
-                <Image
-                  src={item.imageUrl || "/images/placeholder-product.svg"}
-                  alt={item.productName}
-                  fill
-                  className="object-cover"
-                  unoptimized
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement
-                    target.src = "/images/placeholder-product.svg"
-                  }}
-                />
+              <div className="relative w-full md:w-[250px] h-[250px] rounded-lg overflow-hidden bg-gray-900 flex items-center justify-center">
+                {item.imageUrl ? (
+                  <Image
+                    src={item.imageUrl}
+                    alt={item.productName}
+                    fill
+                    className="object-cover"
+                    unoptimized
+                    onError={(e) => {
+                      const target = e.target as HTMLImageElement
+                      target.style.display = "none"
+                      const parent = target.parentElement
+                      if (parent) {
+                        const fallback = document.createElement("span")
+                        fallback.className = "text-white text-center px-4 font-medium text-lg"
+                        fallback.textContent = item.brand || item.productName
+                        parent.appendChild(fallback)
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className="text-white text-center px-4 font-medium text-lg">
+                    {item.brand || item.productName}
+                  </span>
+                )}
               </div>
             </div>
 
             {/* Product Info */}
             <div className="flex-1 space-y-4">
               <div>
-                <div className="flex items-start justify-between mb-2">
-                  <div>
-                    <h1 className="text-3xl font-bold">{item.productName}</h1>
-                    <p className="text-muted-foreground mt-1">
-                      {item.category}
-                    </p>
-                  </div>
-                  <Badge
-                    variant="outline"
-                    className={`${getStatusBadgeVariant(item.status)} text-sm px-3 py-1`}
-                  >
-                    {getStatusLabel(item.status)}
-                  </Badge>
+                <div className="mb-2">
+                  <h1 className="text-3xl font-bold">{item.productName}</h1>
+                  <p className="text-muted-foreground mt-1">
+                    {item.category}
+                  </p>
                 </div>
               </div>
 
-              <Separator />
-
-              {/* Product Details Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {/* Product Details Row - 5 columns: SKU, Ref ID, Item Type, Supply Type, Stock Config */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-6 gap-y-4">
+                {/* SKU */}
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Barcode className="h-4 w-4" />
-                    <span>Barcode</span>
+                    <span>SKU</span>
                   </div>
-                  <p className="font-mono text-lg">{item.barcode || item.productId}</p>
+                  <p className="font-mono text-base">{item.barcode || item.productId}</p>
                 </div>
 
+                {/* Ref ID */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Tag className="h-4 w-4" />
+                    <span>Ref ID</span>
+                  </div>
+                  <p className="font-mono text-sm">{item.id || "-"}</p>
+                </div>
+
+                {/* Item Type */}
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     {item.itemType === "weight" || item.itemType === "pack_weight" ? (
@@ -189,11 +219,10 @@ export function InventoryDetailView({
                   <div className="flex items-center gap-2">
                     <Badge
                       variant="outline"
-                      className={`${
-                        item.itemType === "weight" || item.itemType === "pack_weight"
-                          ? "bg-blue-100 text-blue-800"
-                          : "bg-gray-100 text-gray-800"
-                      } text-sm`}
+                      className={`${item.itemType === "weight" || item.itemType === "pack_weight"
+                        ? "bg-blue-100 text-blue-800 border-blue-200"
+                        : "bg-gray-100 text-gray-800 border-gray-200"
+                        } text-sm`}
                     >
                       {item.itemType === "weight" && "Weight Item (kg)"}
                       {item.itemType === "pack_weight" && "Pack Weight (kg)"}
@@ -203,6 +232,7 @@ export function InventoryDetailView({
                   </div>
                 </div>
 
+                {/* Supply Type */}
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Package className="h-4 w-4" />
@@ -214,11 +244,10 @@ export function InventoryDetailView({
                         <div className="flex items-center gap-2 cursor-help">
                           <Badge
                             variant="outline"
-                            className={`${
-                              item.supplyType === "On Hand Available"
-                                ? "bg-green-100 text-green-800 border-green-300"
-                                : "bg-blue-100 text-blue-800 border-blue-300"
-                            } text-sm`}
+                            className={`${item.supplyType === "On Hand Available"
+                              ? "bg-green-100 text-green-800 border-green-300"
+                              : "bg-blue-100 text-blue-800 border-blue-300"
+                              } text-sm`}
                           >
                             {item.supplyType || "On Hand Available"}
                           </Badge>
@@ -236,60 +265,44 @@ export function InventoryDetailView({
                   </TooltipProvider>
                 </div>
 
+                {/* Stock Config */}
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Shield className="h-4 w-4" />
+                    <Circle className="h-4 w-4" />
                     <span>Stock Config</span>
                   </div>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <div className="flex items-center gap-2 cursor-help">
-                          {item.stockConfigStatus === "valid" && (
-                            <>
-                              <CheckCircle className="h-5 w-5 text-green-600" />
-                              <span className="text-sm text-green-700">Valid</span>
-                            </>
-                          )}
-                          {item.stockConfigStatus === "invalid" && (
-                            <>
-                              <AlertTriangle className="h-5 w-5 text-yellow-600" />
-                              <span className="text-sm text-yellow-700">Invalid</span>
-                            </>
-                          )}
-                          {(item.stockConfigStatus === "unconfigured" || !item.stockConfigStatus) && (
-                            <>
-                              <Minus className="h-5 w-5 text-gray-400" />
-                              <span className="text-sm text-gray-500">Unconfigured</span>
-                            </>
-                          )}
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">
-                          {item.stockConfigStatus === "valid" && "Stock configuration is correct and all settings are properly configured"}
-                          {item.stockConfigStatus === "invalid" && "Stock configuration has errors that need attention"}
-                          {(item.stockConfigStatus === "unconfigured" || !item.stockConfigStatus) && "Stock configuration has not been set up yet"}
-                        </p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <div className="flex items-center gap-2">
+                    {item.stockConfigStatus === "valid" ? (
+                      <>
+                        <Check className="h-4 w-4 text-green-600" />
+                        <span className="text-green-700 font-medium">Configured</span>
+                      </>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <Separator />
-
               {/* Last Restocked */}
               <div className="space-y-1">
-                <p className="text-sm text-muted-foreground">Last Restocked</p>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Clock className="h-4 w-4" />
+                  <span>Last Restocked</span>
+                </div>
                 <p className="text-base">
-                  {new Date(item.lastRestocked).toLocaleString("en-US", {
-                    month: "long",
-                    day: "numeric",
-                    year: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
+                  {(() => {
+                    const date = new Date(item.lastRestocked)
+                    if (isNaN(date.getTime())) return "-"
+                    const pad = (n: number) => n.toString().padStart(2, '0')
+                    const month = pad(date.getMonth() + 1)
+                    const day = pad(date.getDate())
+                    const year = date.getFullYear()
+                    const hours = pad(date.getHours())
+                    const minutes = pad(date.getMinutes())
+                    const seconds = pad(date.getSeconds())
+                    return `${month}/${day}/${year} ${hours}:${minutes}:${seconds}`
+                  })()}
                 </p>
               </div>
             </div>
@@ -464,8 +477,8 @@ export function InventoryDetailView({
         </CardContent>
       </Card>
 
-      {/* Stock by Store Section */}
-      {item.warehouseLocations && item.warehouseLocations.length > 0 && (
+      {/* Stock by Store Section - Hidden when viewing from store-specific context */}
+      {!storeContext && item.warehouseLocations && item.warehouseLocations.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Stock by Store</CardTitle>
@@ -477,6 +490,8 @@ export function InventoryDetailView({
             <StockByStoreTable
               locations={item.warehouseLocations}
               itemType={item.itemType}
+              storeName={item.storeName}
+              storeId={item.storeId}
             />
           </CardContent>
         </Card>
@@ -488,8 +503,31 @@ export function InventoryDetailView({
         productName={item.productName}
       />
 
-      {/* Recent Transactions */}
-      <RecentTransactionsTable transactions={transactions} />
+      {/* Recent Transactions (Quick Overview - Last 10) */}
+      <RecentTransactionsTable
+        transactions={filteredTransactions}
+        viewChannels={viewChannels}
+        storeName={item.storeName}
+        storeId={item.storeId}
+      />
+
+      {/* Full Transaction History Section - hidden per user request
+      <TransactionHistorySection
+        productId={item.id}
+        productName={item.productName}
+        itemType={item.itemType}
+        storeContext={storeContext}
+      />
+      */}
+
+      {/* Allocate by Order Transactions - hidden per user request
+      <AllocateByOrderTable
+        transactions={allocateTransactions || []}
+        loading={allocateLoading}
+        error={allocateError}
+        onRetry={refetchAllocate}
+      />
+      */}
     </div>
   )
 }

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useToast } from "@/components/ui/use-toast"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import {
   ArrowLeft,
+  Ban,
   ChevronDown,
   PackageOpen,
   Search,
@@ -33,16 +34,38 @@ import {
   History,
   Home,
   Store,
+  StickyNote,
+  Plus,
+  MoreVertical,
+  Printer,
+  FileDown,
 } from "lucide-react";
+// Dialog import removed - Notes moved to tab
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Textarea } from "@/components/ui/textarea"
 import { useRouter } from "next/navigation"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Input } from "@/components/ui/input"
 import { Order, ApiCustomer, ApiShippingAddress, ApiPaymentInfo, ApiSLAInfo, ApiMetadata, ApiOrderItem } from "./order-management-hub" // Assuming Order and its sub-types are exported
+import { formatGMT7DateTime } from "@/lib/utils"
+import { formatCurrency } from "@/lib/currency-utils"
 import { DeliveryMethod } from "@/types/delivery"
-import { ChannelBadge, PriorityBadge, PaymentStatusBadge, OrderStatusBadge, OnHoldBadge, ReturnStatusBadge, SLABadge } from "./order-badges";
+import { ChannelBadge, PaymentStatusBadge, OrderStatusBadge, OnHoldBadge, ReturnStatusBadge, DeliveryTypeCodeBadge, getDeliveryTypeCodeLabel } from "./order-badges";
+// import { SLABadge } from "./order-badges"; // Disabled SLA elements
 import { AuditTrailTab } from "./order-detail/audit-trail-tab"
 import { FulfillmentTimeline } from "./order-detail/fulfillment-timeline"
 import { TrackingTab } from "./order-detail/tracking-tab"
+import { PaymentsTab } from "./order-detail/payments-tab"
+import { CancelOrderDialog } from "./order-detail/cancel-order-dialog"
+import { isOrderCancellable, getCancelDisabledReason } from "@/lib/order-status-utils"
+import { getCancelReasonById } from "@/lib/cancel-reasons"
+import { Skeleton } from "@/components/ui/skeleton"
 
 interface OrderDetailViewProps {
   order?: Order | null;
@@ -50,12 +73,44 @@ interface OrderDetailViewProps {
   orderId?: string;
 }
 
+// Note interface for order notes
+interface Note {
+  id: string
+  orderId: string
+  content: string
+  createdBy: string // Auto-populated from currentUser.email (e.g., "buabsupattra@central.co.th")
+  createdAt: string // Auto-populated: ISO format "2026-01-21T11:50:00"
+}
+
+// Helper function to format timestamp as "2026-01-21T11:50:00"
+const formatNoteTimestamp = (date: Date): string => {
+  const pad = (n: number) => n.toString().padStart(2, '0')
+
+  const year = date.getFullYear()
+  const month = pad(date.getMonth() + 1)
+  const day = pad(date.getDate())
+  const hours = pad(date.getHours())
+  const minutes = pad(date.getMinutes())
+  const seconds = pad(date.getSeconds())
+
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`
+}
+
+// Helper function to map delivery codes to custom labels
+const getCustomDeliveryLabel = (code?: string): string => {
+  if (!code) return 'Standard';
+  const c = code.toUpperCase();
+  if (c.includes('EXP') || c.includes('FAST') || c.includes('1 HR')) return 'Express';
+  return 'Standard';
+}
+
 // Home Delivery Section Component
 interface HomeDeliverySectionProps {
   delivery: DeliveryMethod;
+  deliveryLabel?: string;
 }
 
-function HomeDeliverySection({ delivery }: HomeDeliverySectionProps) {
+function HomeDeliverySection({ delivery, deliveryLabel }: HomeDeliverySectionProps) {
   const details = delivery.homeDelivery;
   if (!details) return null;
 
@@ -66,7 +121,7 @@ function HomeDeliverySection({ delivery }: HomeDeliverySectionProps) {
         <div className="flex items-center gap-2">
           <Home className="h-5 w-5 text-blue-600" />
           <h4 className="font-medium text-gray-900">Home Delivery</h4>
-          <Badge className="bg-blue-100 text-blue-800 border-blue-300">DELIVERY</Badge>
+          <Badge className="bg-blue-100 text-blue-800 border-blue-300">{deliveryLabel || 'Standard'}</Badge>
         </div>
         <span className="text-sm text-gray-500">{delivery.itemCount} item{delivery.itemCount !== 1 ? 's' : ''}</span>
       </div>
@@ -107,9 +162,10 @@ function HomeDeliverySection({ delivery }: HomeDeliverySectionProps) {
 // Click & Collect Section Component
 interface ClickCollectSectionProps {
   delivery: DeliveryMethod;
+  deliveryLabel?: string;
 }
 
-function ClickCollectSection({ delivery }: ClickCollectSectionProps) {
+function ClickCollectSection({ delivery, deliveryLabel }: ClickCollectSectionProps) {
   const details = delivery.clickCollect;
   if (!details) return null;
 
@@ -120,7 +176,7 @@ function ClickCollectSection({ delivery }: ClickCollectSectionProps) {
         <div className="flex items-center gap-2">
           <Store className="h-5 w-5 text-purple-600" />
           <h4 className="font-medium text-gray-900">Click & Collect</h4>
-          <Badge className="bg-purple-100 text-purple-800 border-purple-300">PICKUP</Badge>
+          <Badge className="bg-purple-100 text-purple-800 border-purple-300">{deliveryLabel || 'Standard'}</Badge>
         </div>
         <span className="text-sm text-gray-500">{delivery.itemCount} item{delivery.itemCount !== 1 ? 's' : ''}</span>
       </div>
@@ -158,22 +214,45 @@ function ClickCollectSection({ delivery }: ClickCollectSectionProps) {
 }
 
 
-// Helper function to format order created timestamp
+// Helper function to format order created timestamp in MM/DD/YYYY HH:mm:ss format
 const formatOrderCreatedDate = (dateString?: string): string => {
   if (!dateString) return '-'
   try {
     const date = new Date(dateString)
-    const day = String(date.getDate()).padStart(2, '0')
+    if (isNaN(date.getTime())) return '-'
     const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
     const year = date.getFullYear()
     const hours = String(date.getHours()).padStart(2, '0')
     const minutes = String(date.getMinutes()).padStart(2, '0')
     const seconds = String(date.getSeconds()).padStart(2, '0')
-    return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`
+    return `${month}/${day}/${year} ${hours}:${minutes}:${seconds}`
   } catch {
     return '-'
   }
 }
+
+// Helper function to map customerTypeId to descriptive labels
+// DEPRECATED: Use order.customer.customerType instead of order.customerTypeId
+// const getCustomerTypeLabel = (customerTypeId: string | undefined | null): string => {
+//   if (!customerTypeId) return '-';
+
+//   const clusterMapping: Record<string, string> = {
+//     'cluster_1': 'Standard',
+//     'cluster_2': 'Premium',
+//     'cluster_3': 'Prime',
+//     'cluster_4': 'VIP',
+//   };
+
+//   // Check if the ID is a cluster_X format
+//   const clusterId = customerTypeId.toLowerCase().split(' ')[0]; // Handle "cluster_3 - Prime" format
+//   if (clusterMapping[clusterId]) {
+//     return `${clusterId} - ${clusterMapping[clusterId]}`;
+//   }
+
+//   // For non-cluster IDs, return as-is
+//   return customerTypeId;
+// };
 
 export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProps) {
   const router = useRouter()
@@ -183,6 +262,175 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({})
   const [copiedOrderId, setCopiedOrderId] = useState(false)
   const [allItemsExpanded, setAllItemsExpanded] = useState(false)
+  const [showCancelDialog, setShowCancelDialog] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
+
+  // Notes feature state
+  const [notes, setNotes] = useState<Note[]>([])
+  const [newNote, setNewNote] = useState("")
+  const [showAddNoteForm, setShowAddNoteForm] = useState(false)
+  const [currentUser, setCurrentUser] = useState<{ email: string } | null>(null)
+
+  // Order data fetching state (for route-based access via orderId)
+  const [fetchedOrder, setFetchedOrder] = useState<Order | null>(null)
+  const [isLoadingOrder, setIsLoadingOrder] = useState(false)
+  const [fetchError, setFetchError] = useState<string | null>(null)
+
+  // Use prop order if provided, otherwise use fetched order data
+  const displayOrder = order || fetchedOrder
+
+  // Fetch order data when orderId is provided but order prop is not
+  useEffect(() => {
+    // Only fetch if orderId is provided and order prop is not
+    if (orderId && !order) {
+      const fetchOrderData = async () => {
+        setIsLoadingOrder(true)
+        setFetchError(null)
+
+        try {
+          const response = await fetch(`/api/orders/details/${orderId}`)
+
+          if (!response.ok) {
+            throw new Error(`Failed to fetch order: ${response.status} ${response.statusText}`)
+          }
+
+          const data = await response.json()
+
+          if (data.success && data.data) {
+            setFetchedOrder(data.data)
+          } else {
+            throw new Error("Order not found")
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "Failed to load order details"
+          setFetchError(errorMessage)
+          toast({
+            title: "Error loading order",
+            description: errorMessage,
+            variant: "destructive",
+          })
+        } finally {
+          setIsLoadingOrder(false)
+        }
+      }
+
+      fetchOrderData()
+    }
+  }, [orderId, order, toast])
+
+  // Determine if order can be cancelled based on its status
+  const canCancelOrder = displayOrder?.status
+    ? isOrderCancellable(displayOrder.status)
+    : false
+
+  // Compute note count for badge (total of all notes)
+  const noteCount = notes.length
+
+  // Fetch notes and user on mount
+  useEffect(() => {
+    if (displayOrder?.id) {
+      fetchNotes()
+      fetchCurrentUser()
+    }
+  }, [displayOrder?.id])
+
+  const fetchNotes = async () => {
+    // TODO: Replace with actual API call
+    // For now, using mock data
+    const mockNotes: Note[] = [
+      {
+        id: '1',
+        orderId: displayOrder?.id || '',
+        content: 'Customer requested gift wrapping',
+        createdBy: 'buabsupattra@central.co.th',
+        createdAt: '2026-01-13T13:13:00',
+      },
+      {
+        id: '2',
+        orderId: displayOrder?.id || '',
+        content: 'Address verified with customer',
+        createdBy: 'jane.smith@central.co.th',
+        createdAt: '2026-01-13T10:15:00',
+      },
+    ]
+    setNotes(mockNotes)
+  }
+
+  const fetchCurrentUser = async () => {
+    // TODO: Replace with actual user session fetch
+    // For now, using mock user
+    setCurrentUser({ email: 'user@central.co.th' })
+  }
+
+  const handleSaveNote = async () => {
+    if (!newNote.trim()) return
+
+    try {
+      const noteData = {
+        orderId: displayOrder?.id || '',
+        content: newNote.trim(),
+        createdBy: currentUser?.email || 'system@central.co.th', // Auto-populated
+        createdAt: formatNoteTimestamp(new Date()), // Auto-populated: "2026-01-21T11:50:00"
+      }
+
+      // TODO: Replace with actual API call
+      // const response = await fetch(`/api/orders/${displayOrder?.id}/notes`, {
+      //   method: 'POST',
+      //   headers: { 'Content-Type': 'application/json' },
+      //   body: JSON.stringify(noteData),
+      // })
+      // if (!response.ok) throw new Error('Failed to save note')
+      // const savedNote = await response.json()
+
+      // For now, create note locally with generated ID
+      const savedNote: Note = {
+        id: Date.now().toString(),
+        ...noteData,
+      }
+
+      // Update local state (add to beginning - newest first)
+      setNotes([savedNote, ...notes])
+
+      // Reset form and hide it
+      setNewNote("")
+      setShowAddNoteForm(false)
+
+      toast({
+        title: 'Note saved successfully',
+        variant: 'default',
+      })
+    } catch (error) {
+      toast({
+        title: 'Failed to save note',
+        variant: 'destructive',
+      })
+      console.error(error)
+    }
+  }
+
+  const handleDeleteNote = async (noteId: string) => {
+    try {
+      // TODO: Replace with actual API call
+      // const response = await fetch(`/api/orders/${displayOrder?.id}/notes/${noteId}`, {
+      //   method: 'DELETE',
+      // })
+      // if (!response.ok) throw new Error('Failed to delete note')
+
+      // Update local state
+      setNotes(notes.filter(note => note.id !== noteId))
+
+      toast({
+        title: 'Note deleted successfully',
+        variant: 'default',
+      })
+    } catch (error) {
+      toast({
+        title: 'Failed to delete note',
+        variant: 'destructive',
+      })
+      console.error(error)
+    }
+  }
 
   const toggleItemExpansion = (sku: string) => {
     setExpandedItems((prev) => ({
@@ -196,7 +444,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
       setExpandedItems({})
     } else {
       const allExpanded: Record<string, boolean> = {}
-      order?.items?.forEach((item: ApiOrderItem) => {
+      displayOrder?.items?.forEach((item: ApiOrderItem) => {
         allExpanded[item.product_sku] = true
       })
       setExpandedItems(allExpanded)
@@ -205,39 +453,200 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
   }
 
   const copyOrderIdToClipboard = async () => {
-    if (order?.id) {
+    if (displayOrder?.order_no) {
       try {
-        await navigator.clipboard.writeText(order.id)
+        await navigator.clipboard.writeText(displayOrder.order_no)
         setCopiedOrderId(true)
         toast({
           title: "Copied to clipboard",
-          description: `Order ID ${order.id} copied successfully`,
+          description: `Order number ${displayOrder.order_no} copied successfully`,
           variant: "default",
         })
         setTimeout(() => setCopiedOrderId(false), 2000)
       } catch (err) {
         toast({
           title: "Copy failed",
-          description: "Failed to copy order ID to clipboard",
+          description: "Failed to copy order number to clipboard",
           variant: "destructive",
         })
       }
     }
   }
 
-  const filteredItems = order?.items
-    ? order.items.filter((item: ApiOrderItem) => {
-        const searchTerm = itemSearchTerm.toLowerCase();
-        const productName = (item.product_name || '').toLowerCase();
-        const productSku = (item.product_sku || '').toLowerCase();
-        // product_details might contain description, but we don't have its type yet.
-        // For now, we'll only filter by name and SKU.
-        return (
-          productName.includes(searchTerm) ||
-          productSku.includes(searchTerm)
-        );
+  const handleCancelOrder = async (reasonId: string) => {
+    setIsCancelling(true)
+    try {
+      // Note: In a real implementation, this would call an API to cancel the order
+      // For now, we simulate the cancellation with a delay
+      await new Promise(resolve => setTimeout(resolve, 1000))
+
+      const reason = getCancelReasonById(reasonId)
+      toast({
+        title: "Order Cancelled",
+        description: `Order ${displayOrder?.order_no} has been cancelled. Reason: ${reason?.shortDescription || reasonId}`,
+        variant: "default",
       })
+      setShowCancelDialog(false)
+      // Note: In production, refresh order data here or update local state
+    } catch (error) {
+      toast({
+        title: "Cancellation Failed",
+        description: "Failed to cancel the order. Please try again.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsCancelling(false)
+    }
+  }
+
+  const handleRefresh = () => {
+    // TODO: Implement actual data refresh logic
+    toast({
+      title: "Refreshing...",
+      description: "Order data is being refreshed.",
+      variant: "default",
+    })
+    // In production, this would trigger a re-fetch of order data
+  }
+
+  const filteredItems = displayOrder?.items
+    ? displayOrder.items.filter((item: ApiOrderItem) => {
+      const searchTerm = itemSearchTerm.toLowerCase();
+      const productName = (item.product_name || '').toLowerCase();
+      const productSku = (item.product_sku || '').toLowerCase();
+      // product_details might contain description, but we don't have its type yet.
+      // For now, we'll only filter by name and SKU.
+      return (
+        productName.includes(searchTerm) ||
+        productSku.includes(searchTerm)
+      );
+    })
     : [];
+
+  // Retry fetch function for error state
+  const handleRetryFetch = () => {
+    if (orderId && !order) {
+      setFetchError(null)
+      setIsLoadingOrder(true)
+      fetch(`/api/orders/details/${orderId}`)
+        .then(response => {
+          if (!response.ok) throw new Error(`Failed to fetch order: ${response.status}`)
+          return response.json()
+        })
+        .then(data => {
+          if (data.success && data.data) {
+            setFetchedOrder(data.data)
+          } else {
+            throw new Error("Order not found")
+          }
+        })
+        .catch(error => {
+          const errorMessage = error instanceof Error ? error.message : "Failed to load order details"
+          setFetchError(errorMessage)
+          toast({
+            title: "Error loading order",
+            description: errorMessage,
+            variant: "destructive",
+          })
+        })
+        .finally(() => setIsLoadingOrder(false))
+    }
+  }
+
+  // Loading state - show skeleton
+  if (isLoadingOrder) {
+    return (
+      <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+        {/* Header Skeleton */}
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Skeleton className="h-10 w-10 rounded-md" />
+              <div className="space-y-2">
+                <Skeleton className="h-6 w-32" />
+                <Skeleton className="h-4 w-24" />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-9 w-24" />
+              <Skeleton className="h-9 w-28" />
+              <Skeleton className="h-9 w-20" />
+            </div>
+          </div>
+        </div>
+
+        {/* Quick Info Cards Skeleton */}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-5">
+          {[1, 2, 3].map((i) => (
+            <Card key={i}>
+              <CardContent className="p-3 sm:p-4">
+                <div className="space-y-2">
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-6 w-24" />
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        {/* Tabs Skeleton */}
+        <div className="space-y-5">
+          <Skeleton className="h-10 w-full rounded-md" />
+          <Card>
+            <CardContent className="p-6">
+              <div className="space-y-4">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="flex justify-between items-center">
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-4 w-32" />
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
+  // Error state - show error with retry
+  if (fetchError && !displayOrder) {
+    return (
+      <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => router.push('/orders')}
+            className="h-10 w-10"
+            title="Back to Orders"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </Button>
+          <h1 className="text-lg sm:text-xl md:text-2xl font-semibold text-enterprise-dark">
+            Order Details
+          </h1>
+        </div>
+        <Alert className="border-red-200 bg-red-50">
+          <AlertTriangle className="h-4 w-4 text-red-500" />
+          <AlertDescription className="text-red-700 flex items-center justify-between">
+            <span>
+              <strong>Error:</strong> {fetchError}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRetryFetch}
+              className="ml-4"
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    )
+  }
 
   return (
     <div className="p-4 sm:p-6 space-y-4 sm:space-y-6">
@@ -245,82 +654,130 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" onClick={onClose} className="flex items-center gap-2">
-              <ArrowLeft className="h-4 w-4" />
-              <span className="hidden sm:inline">Back to Orders</span>
-              <span className="sm:hidden">Back</span>
+            {/* Back Button - Icon only */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => router.push('/orders')}
+              className="h-10 w-10 min-h-[44px]"
+              title="Back to Orders"
+            >
+              <ArrowLeft className="h-5 w-5" />
             </Button>
+            {/* Title Area */}
             <div className="min-w-0 flex-1">
-              <h1 className="text-lg sm:text-xl md:text-2xl font-semibold text-enterprise-dark truncate">Order Details</h1>
-              <p className="text-xs sm:text-sm text-enterprise-text-light">Order #{order?.order_no || 'N/A'}</p>
+              <h1 className="text-lg sm:text-xl md:text-2xl font-semibold text-enterprise-dark truncate">
+                Order Details
+              </h1>
+              <div className="flex items-center gap-1">
+                <span className="text-sm text-muted-foreground font-mono">
+                  {displayOrder?.order_no || 'N/A'}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={copyOrderIdToClipboard}
+                  className="h-6 w-6"
+                  title="Copy order number to clipboard"
+                >
+                  {copiedOrderId ? (
+                    <Check className="h-3 w-3 text-green-600" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
+                </Button>
+              </div>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={onClose} className="sm:hidden">
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-        
-        {/* Action Buttons - Mobile First Design */}
-        <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
-          <div className="grid grid-cols-2 sm:flex gap-2 sm:gap-3 flex-1">
-            <Button variant="outline" size="sm" className="justify-center">
-              <Download className="h-4 w-4 sm:mr-2" />
-              <span className="hidden sm:inline">Export</span>
-              <span className="sm:hidden text-xs">Export</span>
+          {/* Action Button Group */}
+          <div className="flex items-center gap-2">
+            {/* Refresh Button */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleRefresh}
+              className="min-h-[44px] sm:min-h-0"
+            >
+              <RefreshCw className="h-4 w-4" />
+              <span className="hidden sm:inline ml-2">Refresh</span>
             </Button>
-            <Button variant="outline" size="sm" className="justify-center">
-              <Edit className="h-4 w-4 sm:mr-2" />
-              <span className="hidden sm:inline">Edit Order</span>
-              <span className="sm:hidden text-xs">Edit</span>
+            {/* Cancel Order Button */}
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setShowCancelDialog(true)}
+              disabled={!canCancelOrder || isCancelling}
+              className={`min-h-[44px] sm:min-h-0 ${!canCancelOrder ? "opacity-50 cursor-not-allowed" : ""}`}
+              title={!canCancelOrder ? getCancelDisabledReason(displayOrder?.status || '') : "Cancel this order"}
+            >
+              <Ban className="h-4 w-4" />
+              <span className="hidden sm:inline ml-2">Cancel Order</span>
             </Button>
-            <Button size="sm" className="bg-blue-500 hover:bg-blue-600 justify-center col-span-2 sm:col-span-1">
-              <RefreshCw className="h-4 w-4 sm:mr-2" />
-              <span className="hidden sm:inline">Process Order</span>
-              <span className="sm:hidden text-xs">Process</span>
-            </Button>
+            {/* Actions Dropdown */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="min-h-[44px] sm:min-h-0">
+                  <MoreVertical className="h-4 w-4" />
+                  <span className="hidden sm:inline ml-2">Actions</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => toast({ title: "Print", description: "Print functionality coming soon." })}>
+                  <Printer className="h-4 w-4 mr-2" />
+                  Print
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => toast({ title: "Export", description: "Export functionality coming soon." })}>
+                  <FileDown className="h-4 w-4 mr-2" />
+                  Export
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => toast({ title: "Duplicate", description: "Duplicate functionality coming soon." })}>
+                  <Copy className="h-4 w-4 mr-2" />
+                  Duplicate
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <Button variant="outline" size="sm" onClick={onClose} className="hidden sm:flex">
-            <X className="h-4 w-4" />
-          </Button>
         </div>
       </div>
 
-      {/* SLA Alert */}
-      {order?.sla_info?.status === "BREACH" && (
-        <Alert className="border-red-200 bg-red-50">
-          <AlertTriangle className="h-4 w-4 text-red-500" />
-          <AlertDescription className="text-red-700">
-            <strong>SLA Breach:</strong> This order has exceeded the {order.sla_info.target_minutes}-minute processing target
-            by {order.sla_info.elapsed_minutes - order.sla_info.target_minutes} minutes.
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* SLA Alert - DISABLED */}
+      {/* {
+        order?.sla_info?.status === "BREACH" && (
+          <Alert className="border-red-200 bg-red-50">
+            <AlertTriangle className="h-4 w-4 text-red-500" />
+            <AlertDescription className="text-red-700">
+              <strong>SLA Breach:</strong> This order has exceeded the {order.sla_info.target_minutes}-minute processing target
+              by {order.sla_info.elapsed_minutes - order.sla_info.target_minutes} minutes.
+            </AlertDescription>
+          </Alert>
+        )
+      } */}
 
       {/* Quick Info Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-5">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-5">
         <Card>
           <CardContent className="p-3 sm:p-4">
             <div className="space-y-2">
               <p className="text-xs sm:text-sm text-enterprise-text-light">Status</p>
-              <div><OrderStatusBadge status={order?.status || 'N/A'} /></div>
+              <div><OrderStatusBadge status={displayOrder?.status || 'N/A'} /></div>
             </div>
           </CardContent>
         </Card>
 
-        <Card>
+        {/* <Card>
           <CardContent className="p-3 sm:p-4">
             <div className="space-y-2">
               <p className="text-xs sm:text-sm text-enterprise-text-light">Priority</p>
               <div><PriorityBadge priority={order?.metadata?.priority || 'N/A'} /></div>
             </div>
           </CardContent>
-        </Card>
+        </Card> */}
 
         <Card>
           <CardContent className="p-3 sm:p-4">
             <div className="space-y-2">
               <p className="text-xs sm:text-sm text-enterprise-text-light">Channel</p>
-              <div><ChannelBadge channel={order?.channel || 'N/A'} /></div>
+              <div><ChannelBadge channel={displayOrder?.channel || 'N/A'} /></div>
             </div>
           </CardContent>
         </Card>
@@ -330,7 +787,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
             <div className="flex items-center justify-between">
               <div className="min-w-0 flex-1">
                 <p className="text-xs sm:text-sm text-enterprise-text-light">Total Amount</p>
-                <p className="text-base sm:text-lg font-semibold mt-1 truncate">฿{order?.total_amount?.toFixed(2) || '0.00'}</p>
+                <p className="text-base sm:text-lg font-semibold mt-1 truncate">{formatCurrency(displayOrder?.total_amount)}</p>
               </div>
               <DollarSign className="h-4 w-4 sm:h-5 sm:w-5 text-green-500 flex-shrink-0" />
             </div>
@@ -340,18 +797,20 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
 
       {/* Main Content Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-5">
-        <TabsList className="bg-white border border-enterprise-border grid w-full grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 h-auto p-1">
+        <TabsList className="bg-white border border-enterprise-border grid w-full grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 h-auto p-1">
           <TabsTrigger value="overview" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Overview</TabsTrigger>
-          <TabsTrigger value="items" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Items ({order?.items?.length || 0})</TabsTrigger>
+          <TabsTrigger value="items" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Items ({displayOrder?.items?.length || 0})</TabsTrigger>
+          <TabsTrigger value="payments" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Payments</TabsTrigger>
           <TabsTrigger value="fulfillment" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Fulfillment</TabsTrigger>
-          <TabsTrigger value="delivery" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Delivery</TabsTrigger>
           <TabsTrigger value="tracking" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Tracking</TabsTrigger>
-          <TabsTrigger value="timeline" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Timeline</TabsTrigger>
+          <TabsTrigger value="notes" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap flex items-center gap-1">
+            <StickyNote className="h-3 w-3 hidden sm:inline" />
+            Notes {noteCount > 0 && `(${noteCount})`}
+          </TabsTrigger>
           <TabsTrigger value="audit" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap flex items-center gap-1">
             <History className="h-3 w-3 hidden sm:inline" />
             Audit Trail
           </TabsTrigger>
-          <TabsTrigger value="notes" className="text-xs sm:text-sm px-2 py-2 whitespace-nowrap">Notes</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4 sm:space-y-6">
@@ -368,31 +827,31 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <p className="text-sm text-enterprise-text-light">Name</p>
-                    <p className="font-medium">{order?.customer?.name || '-'}</p>
+                    <p className="font-medium">{displayOrder?.customer?.name || '-'}</p>
                   </div>
-                  <div>
+                  {/* <div>
                     <p className="text-sm text-enterprise-text-light">Customer ID</p>
                     <p className="font-mono text-sm">{order?.customer?.id || '-'}</p>
-                  </div>
+                  </div> */}
                   <div>
                     <p className="text-sm text-enterprise-text-light">Customer Type</p>
-                    <p className="text-sm">{order?.customer?.customerType || '-'}</p>
+                    <p className="text-sm">{displayOrder?.customer?.customerType || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Cust Ref</p>
-                    <p className="font-mono text-sm">{order?.customer?.custRef || '-'}</p>
+                    <p className="font-mono text-sm">{displayOrder?.customer?.custRef || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Email</p>
-                    <p className="text-sm">{order?.customer?.email || '-'}</p>
+                    <p className="text-sm">{displayOrder?.customer?.email || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Phone Number</p>
-                    <p className="text-sm">{order?.customer?.phone || '-'}</p>
+                    <p className="text-sm">{displayOrder?.customer?.phone || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">The1 Member</p>
-                    <p className="font-mono text-sm">{order?.customer?.T1Number || '-'}</p>
+                    <p className="font-mono text-sm">{displayOrder?.customer?.T1Number || '-'}</p>
                   </div>
                 </div>
               </CardContent>
@@ -411,9 +870,9 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                   <div>
                     <p className="text-sm text-enterprise-text-light">Order ID</p>
                     <div className="flex items-center gap-2">
-                      <p className="font-mono text-sm">{order?.id || '-'}</p>
+                      <p className="font-mono text-sm">{displayOrder?.id || '-'}</p>
                       <Button
-                        variant="outline"
+                        variant="ghost"
                         size="sm"
                         onClick={copyOrderIdToClipboard}
                         className="h-6 px-2"
@@ -427,61 +886,57 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                       </Button>
                     </div>
                   </div>
-                  <div>
+                  {/* <div>
                     <p className="text-sm text-enterprise-text-light">Payment Status</p>
                     <PaymentStatusBadge status={order?.payment_info?.status || '-'} />
-                  </div>
-                  <div>
+                  </div> */}
+                  {/* <div>
                     <p className="text-sm text-enterprise-text-light">Short Order ID</p>
                     <p className="font-mono text-sm">{order?.order_no || '-'}</p>
-                  </div>
+                  </div> */}
                   <div>
                     <p className="text-sm text-enterprise-text-light">Store No.</p>
-                    <p className="font-medium">{order?.metadata?.store_no || order?.metadata?.store_name || '-'}</p>
+                    <p className="font-medium">{displayOrder?.metadata?.store_no || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Order Created</p>
-                    <p className="text-sm">{formatOrderCreatedDate(order?.metadata?.order_created)}</p>
+                    <p className="text-sm">{formatOrderCreatedDate(displayOrder?.metadata?.order_created)}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Order Date</p>
-                    <p className="text-sm">{order?.order_date ? new Date(order.order_date).toLocaleString() : '-'}</p>
+                    <p className="text-sm">{displayOrder?.order_date ? formatOrderCreatedDate(displayOrder.order_date) : '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Business Unit</p>
-                    <p className="font-medium">{order?.business_unit || '-'}</p>
+                    <p className="font-medium">{displayOrder?.business_unit || '-'}</p>
                   </div>
-                  <div>
+                  {/* <div>
                     <p className="text-sm text-enterprise-text-light">Order Type</p>
-                    <Badge variant="outline">{order?.order_type || '-'}</Badge>
-                  </div>
+                    <Badge variant="ghost">{order?.order_type || '-'}</Badge>
+                  </div> */}
                   <div>
                     <p className="text-sm text-enterprise-text-light">Full Tax Invoice</p>
-                    <p className="text-sm">{order?.fullTaxInvoice ? 'Yes' : 'No'}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-enterprise-text-light">Customer Type ID</p>
-                    <p className="font-mono text-sm">{order?.customerTypeId || '-'}</p>
+                    <p className="text-sm">{displayOrder?.fullTaxInvoice ? 'Yes' : 'No'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Selling Channel</p>
-                    <p className="text-sm">{order?.sellingChannel || order?.channel || '-'}</p>
+                    <p className="text-sm">{displayOrder?.sellingChannel || displayOrder?.channel || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Allow Substitution</p>
-                    <p className="text-sm">{order?.allowSubstitution ? 'Yes' : 'No'}</p>
+                    <p className="text-sm">{displayOrder?.allow_substitution ? 'Yes' : 'No'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Tax ID</p>
-                    <p className="font-mono text-sm">{order?.taxId || '-'}</p>
+                    <p className="font-mono text-sm">{displayOrder?.taxId || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Company Name</p>
-                    <p className="text-sm">{order?.companyName || '-'}</p>
+                    <p className="text-sm">{displayOrder?.companyName || '-'}</p>
                   </div>
                   <div>
                     <p className="text-sm text-enterprise-text-light">Branch No.</p>
-                    <p className="font-mono text-sm">{order?.branchNo || '-'}</p>
+                    <p className="font-mono text-sm">{displayOrder?.branchNo || '-'}</p>
                   </div>
                 </div>
               </CardContent>
@@ -496,12 +951,22 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                {order?.deliveryMethods && order.deliveryMethods.length > 0 ? (
+                {/* Delivery Type Code - Commented out as per request
+                <div className="flex justify-between items-center pb-3 border-b border-gray-200">
+                  <span className="text-sm text-enterprise-text-light">Delivery Type</span>
+                  <div className="flex items-center gap-2">
+                    <DeliveryTypeCodeBadge deliveryTypeCode={order?.deliveryTypeCode} />
+                    <span className="text-xs text-muted-foreground">
+                      {getDeliveryTypeCodeLabel(order?.deliveryTypeCode)}
+                    </span>
+                  </div>
+                </div> */}
+                {displayOrder?.deliveryMethods && displayOrder.deliveryMethods.length > 0 ? (
                   <>
                     {/* Find home delivery and click collect methods */}
                     {(() => {
-                      const homeDelivery = order.deliveryMethods.find(d => d.type === 'HOME_DELIVERY');
-                      const clickCollect = order.deliveryMethods.find(d => d.type === 'CLICK_COLLECT');
+                      const homeDelivery = displayOrder.deliveryMethods.find(d => d.type === 'HOME_DELIVERY');
+                      const clickCollect = displayOrder.deliveryMethods.find(d => d.type === 'CLICK_COLLECT');
                       const isMixed = homeDelivery && clickCollect;
 
                       return (
@@ -509,7 +974,10 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                           {/* Home Delivery Section */}
                           {homeDelivery && (
                             <div className={isMixed ? 'border-b border-gray-200 pb-4 mb-4' : ''}>
-                              <HomeDeliverySection delivery={homeDelivery} />
+                              <HomeDeliverySection
+                                delivery={homeDelivery}
+                                deliveryLabel={getCustomDeliveryLabel(displayOrder?.deliveryTypeCode)}
+                              />
                             </div>
                           )}
 
@@ -524,7 +992,10 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
 
                           {/* Click & Collect Section */}
                           {clickCollect && (
-                            <ClickCollectSection delivery={clickCollect} />
+                            <ClickCollectSection
+                              delivery={clickCollect}
+                              deliveryLabel={getCustomDeliveryLabel(displayOrder?.deliveryTypeCode)}
+                            />
                           )}
                         </>
                       );
@@ -547,43 +1018,47 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                   Payment Information
                   <Badge
                     variant="outline"
-                    className={order?.payment_info?.status === 'PAID'
+                    className={displayOrder?.payment_info?.status === 'PAID'
                       ? 'bg-green-100 text-green-800 border-green-300'
                       : 'bg-gray-100 text-gray-800 border-gray-300'}
                   >
-                    {order?.payment_info?.status === 'PAID' ? 'PAID' : 'PENDING'}
+                    {displayOrder?.payment_info?.status === 'PAID' ? 'PAID' : 'PENDING'}
                   </Badge>
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-enterprise-text-light">Subtotal</span>
-                  <span className="text-sm font-mono">฿{order?.payment_info?.subtotal?.toFixed(2) || '0.00'}</span>
+                  <span className="text-sm font-mono">{formatCurrency(displayOrder?.payment_info?.subtotal)}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-enterprise-text-light">Discounts</span>
-                  <span className="text-sm font-mono">-฿{order?.payment_info?.discounts?.toFixed(2) || '0.00'}</span>
+                  <span className="text-sm font-mono text-red-600">-{formatCurrency(displayOrder?.payment_info?.discounts)}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-enterprise-text-light">Charges</span>
-                  <span className="text-sm font-mono">฿{order?.payment_info?.charges?.toFixed(2) || '0.00'}</span>
+                  <span className="text-sm font-mono">{formatCurrency(displayOrder?.payment_info?.charges)}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-enterprise-text-light">Shipping Fee</span>
+                  <span className="text-sm font-mono">{formatCurrency(displayOrder?.orderDeliveryFee)}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-enterprise-text-light">Amount Included Taxes</span>
-                  <span className="text-sm font-mono">฿{order?.payment_info?.amountIncludedTaxes?.toFixed(2) || '0.00'}</span>
+                  <span className="text-sm font-mono">{formatCurrency(displayOrder?.payment_info?.amountIncludedTaxes)}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-enterprise-text-light">Amount Excluded Taxes</span>
-                  <span className="text-sm font-mono">฿{order?.payment_info?.amountExcludedTaxes?.toFixed(2) || '0.00'}</span>
+                  <span className="text-sm font-mono">{formatCurrency(displayOrder?.payment_info?.amountExcludedTaxes)}</span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-enterprise-text-light">Taxes</span>
-                  <span className="text-sm font-mono">฿{order?.payment_info?.taxes?.toFixed(2) || '0.00'}</span>
+                  <span className="text-sm font-mono">{formatCurrency(displayOrder?.payment_info?.taxes)}</span>
                 </div>
                 <Separator />
                 <div className="flex justify-between items-center font-semibold">
                   <span>Total</span>
-                  <span className="text-lg font-mono">฿{order?.total_amount?.toFixed(2) || '0.00'}</span>
+                  <span className="text-lg font-mono">{formatCurrency(displayOrder?.total_amount)}</span>
                 </div>
               </CardContent>
             </Card>
@@ -597,7 +1072,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                   <div>
                     <CardTitle className="text-lg sm:text-xl">Order Items</CardTitle>
-                    <CardDescription className="text-sm">{order?.items?.length || 0} items in this order</CardDescription>
+                    <CardDescription className="text-sm">{displayOrder?.items?.length || 0} items in this order</CardDescription>
                   </div>
                   <div className="flex items-center gap-2 w-full sm:w-auto">
                     <div className="relative flex-1 sm:w-72">
@@ -611,7 +1086,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                       />
                     </div>
                     <Button
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
                       onClick={toggleAllItems}
                       className="whitespace-nowrap"
@@ -625,7 +1100,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
             <CardContent className="px-3 sm:px-6">
               {filteredItems.length > 0 ? (
                 <div className="space-y-3">
-                  {filteredItems.map((item: ApiOrderItem) => {
+                  {filteredItems.map((item: ApiOrderItem, index) => {
                     // Helper function to get fulfillment status badge color
                     const getFulfillmentBadgeClass = (status?: string) => {
                       switch (status) {
@@ -638,7 +1113,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                     }
 
                     return (
-                      <Card key={item.product_sku} className="border border-gray-200 overflow-hidden hover:shadow-sm transition-shadow">
+                      <Card key={item.id || `${item.product_sku}-${index}`} className="border border-gray-200 overflow-hidden hover:shadow-sm transition-shadow">
                         {/* Enhanced Item Header */}
                         <div
                           className="p-3 sm:p-4 cursor-pointer hover:bg-gray-50 transition-colors"
@@ -659,11 +1134,11 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                               <div className="flex justify-between items-start gap-2">
                                 <div className="flex-1 min-w-0">
                                   {/* Fulfillment Status Badge */}
-                                  {item.fulfillmentStatus && (
+                                  {/* {item.fulfillmentStatus && (
                                     <Badge className={`mb-1 text-xs ${getFulfillmentBadgeClass(item.fulfillmentStatus)}`}>
                                       {item.fulfillmentStatus}
                                     </Badge>
-                                  )}
+                                  )} */}
                                   {/* Product Name */}
                                   <h4 className="font-medium text-sm sm:text-base text-gray-900 leading-tight" style={{
                                     display: '-webkit-box',
@@ -678,17 +1153,16 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                                     <p className="text-xs text-gray-500 font-mono">
                                       SKU: {item.product_sku || 'N/A'}
                                     </p>
-                                    {item.barcode && (
+                                    {/* {item.barcode && (
                                       <p className="text-xs text-gray-400 font-mono">
                                         | Barcode: {item.barcode}
                                       </p>
-                                    )}
+                                    )} */}
                                   </div>
                                 </div>
                                 <ChevronDown
-                                  className={`h-5 w-5 text-gray-400 transition-transform flex-shrink-0 mt-1 ${
-                                    expandedItems[item.product_sku] ? "rotate-180" : ""
-                                  }`}
+                                  className={`h-5 w-5 text-gray-400 transition-transform flex-shrink-0 mt-1 ${expandedItems[item.product_sku] ? "rotate-180" : ""
+                                    }`}
                                 />
                               </div>
 
@@ -699,19 +1173,19 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                                     <p className="text-xs text-gray-500">Qty:</p>
                                     <p className="text-sm font-medium">{item.quantity}</p>
                                   </div>
-                                  {item.bundleRef && (
+                                  {/* {item.bundleRef && (
                                     <div>
                                       <p className="text-xs text-gray-500">Bundle Ref:</p>
                                       <p className="text-sm font-mono">{item.bundleRef}</p>
                                     </div>
-                                  )}
+                                  )} */}
                                 </div>
                                 <div className="text-right">
                                   <p className="text-lg sm:text-xl font-bold text-green-600">
-                                    ฿{((item.unit_price || 0) * item.quantity).toFixed(2)}
+                                    {formatCurrency(item.unit_price || 0)}
                                   </p>
                                   <p className="text-xs text-gray-500">
-                                    ฿{(item.unit_price || 0).toFixed(2)} each
+                                    each
                                   </p>
                                 </div>
                               </div>
@@ -720,191 +1194,297 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                         </div>
 
                         {/* Collapsible Item Details - 3 Column Layout */}
-                        {expandedItems[item.product_sku] && (
-                          <div className="border-t border-gray-100 bg-gray-50">
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-0 md:gap-4">
-                              {/* Column 1 - Product Details */}
-                              <div className="p-3 sm:p-4">
-                                <div className="bg-gray-100 px-3 py-2 rounded-t-md mb-3">
-                                  <h5 className="text-xs text-gray-600 uppercase tracking-wide font-semibold">Product Details</h5>
-                                </div>
-                                <div className="space-y-3 text-sm">
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">UOM</span>
-                                    <span className="text-gray-900 font-medium">{item.uom || 'EA'}</span>
+                        {expandedItems[item.product_sku] && (() => {
+                          const isPackUOM = ['PACK', 'BOX', 'SET', 'CASE', 'CTN', 'CARTON'].includes(item.uom?.toUpperCase() || '')
+                          return (
+                            <div className="border-t border-gray-100 bg-gray-50">
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-0 md:gap-4">
+                                {/* Column 1 - Product Details */}
+                                <div className="p-3 sm:p-4">
+                                  <div className="bg-gray-100 px-3 py-2 rounded-t-md mb-3">
+                                    <h5 className="text-xs text-gray-600 uppercase tracking-wide font-semibold">Product Details</h5>
                                   </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Supply Type ID</span>
-                                    <span className="text-gray-900 font-medium">{item.supplyTypeId || 'N/A'}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Packed Ordered Qty</span>
-                                    <span className="text-gray-900 font-medium">{item.packedOrderedQty || item.quantity}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Location</span>
-                                    <span className="text-gray-900 font-mono text-xs">{item.location || 'N/A'}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Barcode</span>
-                                    <span className="text-gray-900 font-mono text-xs">{item.barcode || 'N/A'}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Gift Wrapped</span>
-                                    <span className="text-gray-900 font-medium">{item.giftWrapped ? 'Yes' : 'No'}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Gift Message</span>
-                                    <span className="text-gray-900 font-medium italic">
-                                      {item.giftWrapped && item.giftWrappedMessage ? item.giftWrappedMessage : '-'}
-                                    </span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Substitution</span>
-                                    <span className="text-gray-900 font-medium">{item.substitution ? 'Yes' : 'No'}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Brand</span>
-                                    <span className="text-gray-900 font-medium">{item.product_details?.brand || 'N/A'}</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* Column 2 - Pricing & Promotions */}
-                              <div className="p-3 sm:p-4 border-t md:border-t-0 md:border-l border-gray-200">
-                                <div className="bg-gray-100 px-3 py-2 rounded-t-md mb-3">
-                                  <h5 className="text-xs text-gray-600 uppercase tracking-wide font-semibold">Pricing & Promotions</h5>
-                                </div>
-                                <div className="space-y-3 text-sm">
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Price</span>
-                                    <span className="text-gray-900 font-medium">฿{(item.unit_price || 0).toFixed(2)}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Total</span>
-                                    <span className="text-gray-900 font-medium">฿{(item.total_price || 0).toFixed(2)}</span>
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Qty</span>
-                                    <span className="text-gray-900 font-medium">{item.quantity}</span>
-                                  </div>
-
-                                  {/* Promotions & Coupons Section */}
-                                  <div className="pt-2 border-t border-gray-200">
-                                    <p className="text-xs text-gray-600 uppercase tracking-wide font-semibold mb-2">Promotions & Coupons</p>
-                                    {item.promotions && item.promotions.length > 0 ? (
-                                      <div className="space-y-2">
-                                        {item.promotions.map((promo, idx) => (
-                                          <div key={idx} className="bg-white p-2 rounded border border-gray-200 text-xs">
-                                            <div className="flex justify-between">
-                                              <span className="text-gray-500">Discount</span>
-                                              <span className="text-red-600 font-medium">฿{promo.discountAmount.toFixed(2)}</span>
-                                            </div>
-                                            <div className="flex justify-between">
-                                              <span className="text-gray-500">Promo ID</span>
-                                              <span className="text-gray-900 font-mono">{promo.promotionId}</span>
-                                            </div>
-                                            <div className="flex justify-between">
-                                              <span className="text-gray-500">Type</span>
-                                              <span className="text-gray-900">{promo.promotionType}</span>
-                                            </div>
-                                            {promo.secretCode && (
-                                              <div className="flex justify-between">
-                                                <span className="text-gray-500">Code</span>
-                                                <span className="text-gray-900 font-mono">{promo.secretCode}</span>
-                                              </div>
-                                            )}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <p className="text-gray-400 text-xs">No promotions applied</p>
-                                    )}
-                                  </div>
-
-                                  <div className="flex justify-between pt-2">
-                                    <span className="text-gray-500">Gift with Purchase</span>
-                                    <span className="text-gray-900 font-medium">{item.giftWithPurchase || 'None'}</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              {/* Column 3 - Fulfillment & Shipping */}
-                              <div className="p-3 sm:p-4 border-t md:border-t-0 md:border-l border-gray-200">
-                                <div className="bg-gray-100 px-3 py-2 rounded-t-md mb-3">
-                                  <h5 className="text-xs text-gray-600 uppercase tracking-wide font-semibold">Fulfillment & Shipping</h5>
-                                </div>
-                                <div className="space-y-3 text-sm">
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Shipping Method</span>
-                                    <span className="text-gray-900 font-medium">{item.shippingMethod || 'Standard'}</span>
-                                  </div>
-                                  <div className="flex justify-between items-center">
-                                    <span className="text-gray-500">Fulfillment Status</span>
-                                    {item.fulfillmentStatus && (
-                                      <Badge className={`text-xs ${getFulfillmentBadgeClass(item.fulfillmentStatus)}`}>
-                                        {item.fulfillmentStatus}
-                                      </Badge>
-                                    )}
-                                  </div>
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">Bundle</span>
-                                    <span className="text-gray-900 font-medium">{item.bundle ? 'Yes' : 'No'}</span>
-                                  </div>
-                                  {item.bundleRef && (
+                                  <div className="space-y-3 text-sm">
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">UOM</span>
+                                      <span className="text-gray-900 font-medium">{item.uom || 'EA'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Supply Type ID</span>
+                                      <span className="text-gray-900 font-medium">{item.supplyTypeId || 'N/A'}</span>
+                                    </div>
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Location</span>
+                                      <span className="text-gray-900 font-mono text-xs">{item.location || 'N/A'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Barcode</span>
+                                      <span className="text-gray-900 font-mono text-xs">{item.barcode || 'N/A'}</span>
+                                    </div> */}
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Substitution</span>
+                                      <span className="text-gray-900 font-medium">{item.substitution ? 'Yes' : 'No'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Bundle</span>
+                                      <span className="text-gray-900 font-medium">{item.bundle ? 'Yes' : 'No'}</span>
+                                    </div>
                                     <div className="flex justify-between">
                                       <span className="text-gray-500">Bundle Ref</span>
-                                      <span className="text-gray-900 font-mono text-xs">{item.bundleRef}</span>
+                                      <span className="text-gray-900 font-medium">{item.bundleRef || 'N/A'}</span>
                                     </div>
-                                  )}
-                                  <div className="flex justify-between">
-                                    <span className="text-gray-500">ETA</span>
-                                    <span className="text-gray-900 text-xs text-right">
-                                      {item.eta ? `${item.eta.from.split(' ').slice(0, 3).join(' ')} - ${item.eta.to.split(' ').slice(0, 3).join(' ')}` : 'N/A'}
-                                    </span>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Packed Ordered Qty</span>
+                                      <span className="text-gray-900 font-medium">{item.packedOrderedQty || item.quantity}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Gift Wrapped</span>
+                                      <span className="text-gray-900 font-medium">{item.giftWrapped ? 'Yes' : 'No'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Gift Message</span>
+                                      <span className="text-gray-900 font-medium italic">
+                                        {item.giftWrapped && item.giftWrappedMessage ? item.giftWrappedMessage : '-'}
+                                      </span>
+                                    </div>
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Secret Code</span>
+                                      <span className="text-gray-900 font-medium">{item.secretCode || 'N/A'}</span>
+                                    </div> */}
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Style</span>
+                                      <span className="text-gray-900 font-medium">{item.style || 'N/A'}</span>
+                                    </div> */}
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Color</span>
+                                      <span className="text-gray-900 font-medium">{item.color || 'N/A'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Size</span>
+                                      <span className="text-gray-900 font-medium">{item.size || 'N/A'}</span>
+                                    </div>
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Reason</span>
+                                      <span className="text-gray-900 font-medium">{item.reason || 'N/A'}</span>
+                                    </div> */}
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Temperature</span>
+                                      <span className="text-gray-900 font-medium">{item.temperature || 'N/A'}</span>
+                                    </div> */}
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Expiry</span>
+                                      <span className="text-gray-900 font-medium">{item.expiry || 'N/A'}</span>
+                                    </div> */}
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Brand</span>
+                                      <span className="text-gray-900 font-medium">{item.product_details?.brand || 'N/A'}</span>
+                                    </div> */}
                                   </div>
+                                </div>
 
-                                  {/* Price Breakdown Section */}
-                                  {item.priceBreakdown && (
+                                {/* Column 2 - Pricing & Promotions */}
+                                <div className="p-3 sm:p-4 border-t md:border-t-0 md:border-l border-gray-200">
+                                  <div className="bg-gray-100 px-3 py-2 rounded-t-md mb-3">
+                                    <h5 className="text-xs text-gray-600 uppercase tracking-wide font-semibold">Pricing & Promotions</h5>
+                                  </div>
+                                  <div className="space-y-3 text-sm">
+                                    {/* Weight-based conditional display */}
+                                    {(() => {
+                                      const hasWeight = item.weight && item.weight > 0;
+                                      return (
+                                        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                                          {/* Row 1 */}
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Price</span>
+                                            <span className="text-green-600 font-medium">{formatCurrency(item.unit_price)}</span>
+                                          </div>
+                                          <div className="flex justify-between">
+                                            {hasWeight ? (
+                                              <>
+                                                <span className="text-gray-500">Weight</span>
+                                                <span className="text-gray-900 font-medium">{item.weight} kg</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <span className="text-gray-500">Qty</span>
+                                                <span className="text-gray-900 font-medium">{item.quantity}</span>
+                                              </>
+                                            )}
+                                          </div>
+                                          {/* Row 2 */}
+                                          <div className="flex justify-between">
+                                            {hasWeight ? (
+                                              <>
+                                                <span className="text-gray-500">Weight (Actual)</span>
+                                                <span className="text-gray-900 font-medium">{item.actualWeight || item.weight} kg</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <span className="text-gray-500">Total</span>
+                                                <span className="text-green-600 font-medium">{formatCurrency(item.total_price)}</span>
+                                              </>
+                                            )}
+                                          </div>
+                                          <div className="flex justify-between">
+                                            {hasWeight ? (
+                                              <>
+                                                <span className="text-gray-500">Total</span>
+                                                <span className="text-green-600 font-medium">{formatCurrency(item.total_price)}</span>
+                                              </>
+                                            ) : (
+                                              <span></span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })()}
+
+                                    {/* Promotions & Coupons Section */}
                                     <div className="pt-2 border-t border-gray-200">
-                                      <p className="text-xs text-gray-600 uppercase tracking-wide font-semibold mb-2">Price Breakdown</p>
-                                      <div className="space-y-1 text-xs">
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-500">Subtotal</span>
-                                          <span className="text-gray-900">฿{item.priceBreakdown.subtotal.toFixed(2)}</span>
+                                      <p className="text-xs text-gray-600 uppercase tracking-wide font-semibold mb-2">Promotions & Coupons</p>
+                                      {/* Item-level Promotions */}
+                                      {item.promotions && item.promotions.length > 0 && (
+                                        <div className="space-y-2">
+                                          {item.promotions.map((promo, idx) => (
+                                            <div key={promo.promotionId || `promo-${item.product_sku}-${idx}`} className="bg-white p-2 rounded border border-gray-200 text-xs">
+                                              <div className="flex justify-between">
+                                                <span className="text-gray-500">Discount</span>
+                                                <span className="text-red-600 font-medium">{formatCurrency(promo.discountAmount)}</span>
+                                              </div>
+                                              <div className="flex justify-between">
+                                                <span className="text-gray-500">{promo.couponId ? 'Coupon ID' : 'Promo ID'}</span>
+                                                <span className="text-gray-900 font-mono">{promo.couponId || promo.promotionId}</span>
+                                              </div>
+                                              <div className="flex justify-between">
+                                                <span className="text-gray-500">{promo.couponName ? 'Coupon Name' : 'Type'}</span>
+                                                <span className="text-gray-900">{promo.couponName || promo.promotionType}</span>
+                                              </div>
+                                              {promo.secretCode && !promo.couponId && (
+                                                <div className="flex justify-between">
+                                                  <span className="text-gray-500">Code</span>
+                                                  <span className="text-gray-900 font-mono">{promo.secretCode}</span>
+                                                </div>
+                                              )}
+                                            </div>
+                                          ))}
                                         </div>
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-500">Discount</span>
-                                          <span className="text-red-600">-฿{item.priceBreakdown.discount.toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-500">Charges</span>
-                                          <span className="text-gray-900">฿{item.priceBreakdown.charges.toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-500">Amount Excl. Tax</span>
-                                          <span className="text-gray-900">฿{item.priceBreakdown.amountExcludedTaxes.toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-500">Taxes (7%)</span>
-                                          <span className="text-gray-900">฿{item.priceBreakdown.taxes.toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-500">Amount Incl. Tax</span>
-                                          <span className="text-gray-900">฿{item.priceBreakdown.amountIncludedTaxes.toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between pt-1 border-t border-gray-300">
-                                          <span className="text-gray-700 font-semibold">Total</span>
-                                          <span className="text-green-600 font-semibold">฿{item.priceBreakdown.total.toFixed(2)}</span>
+                                      )}
+                                      {/* Empty state when no promotions */}
+                                      {!(item.promotions && item.promotions.length > 0) && (
+                                        <p className="text-gray-400 text-xs">No promotions or coupons applied</p>
+                                      )}
+                                    </div>
+
+                                    <div className="flex justify-between pt-2">
+                                      <span className="text-gray-500">Gift with Purchase</span>
+                                      <span className="text-gray-900 font-medium">{item.giftWithPurchase ? 'Yes' : 'No'}</span>
+                                    </div>
+                                    {item.giftWithPurchase && (
+                                      <div className="flex justify-between pt-2">
+                                        <span className="text-gray-500">Gift with purchase item</span>
+                                        <span className="text-gray-900 font-medium">{item.giftWithPurchase}</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {/* Column 3 - Shipping & Delivery */}
+                                <div className="p-3 sm:p-4 border-t md:border-t-0 md:border-l border-gray-200">
+                                  <div className="bg-gray-100 px-3 py-2 rounded-t-md mb-3">
+                                    <h5 className="text-xs text-gray-600 uppercase tracking-wide font-semibold">Shipping & Delivery</h5>
+                                  </div>
+                                  <div className="space-y-3 text-sm">
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Shipping Method</span>
+                                      <span className="text-gray-900 font-medium">{item.shippingMethod || 'Standard'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Secret Code</span>
+                                      <span className="text-gray-900 font-medium">{item.secretCode || 'N/A'}</span>
+                                    </div>
+                                    {/* <div className="flex justify-between items-center">
+                                      <span className="text-gray-500">Fulfillment Status</span>
+                                      {item.fulfillmentStatus && (
+                                        <Badge className={`text-xs ${getFulfillmentBadgeClass(item.fulfillmentStatus)}`}>
+                                          {item.fulfillmentStatus}
+                                        </Badge>
+                                      )}
+                                    </div> */}
+                                    {/* <div className="flex justify-between">
+                                      <span className="text-gray-500">Bundle</span>
+                                      <span className="text-gray-900 font-medium">{item.bundle ? 'Yes' : 'No'}</span>
+                                    </div> */}
+                                    {/* {item.bundleRef && (
+                                      <div className="flex justify-between">
+                                        <span className="text-gray-500">Bundle Ref</span>
+                                        <span className="text-gray-900 font-mono text-xs">{item.bundleRef}</span>
+                                      </div>
+                                    )} */}
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Route</span>
+                                      <span className="text-gray-900 font-medium">{item.route || 'N/A'}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Booking Slot From</span>
+                                      <span className="text-gray-900 font-medium text-xs">
+                                        {item.bookingSlotFrom ? formatGMT7DateTime(item.bookingSlotFrom) : 'N/A'}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">Booking Slot To</span>
+                                      <span className="text-gray-900 font-medium text-xs">
+                                        {item.bookingSlotFrom ? formatGMT7DateTime(item.bookingSlotTo) : 'N/A'}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-gray-500">ETA</span>
+                                      <span className="text-gray-900 text-xs text-right">
+                                        {item.eta ? `${item.eta.from.split(' ').slice(0, 3).join(' ')} - ${item.eta.to.split(' ').slice(0, 3).join(' ')}` : 'N/A'}
+                                      </span>
+                                    </div>
+
+                                    {/* Price Breakdown Section */}
+                                    {item.priceBreakdown && (
+                                      <div className="pt-2 border-t border-gray-200">
+                                        <p className="text-xs text-gray-600 uppercase tracking-wide font-semibold mb-2">Price Breakdown</p>
+                                        <div className="space-y-1 text-xs">
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Subtotal</span>
+                                            <span className="text-gray-900">{formatCurrency(item.priceBreakdown.subtotal)}</span>
+                                          </div>
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Discount</span>
+                                            <span className="text-red-600">-{formatCurrency(item.priceBreakdown.discount)}</span>
+                                          </div>
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Charges</span>
+                                            <span className="text-gray-900">{formatCurrency(item.priceBreakdown.charges)}</span>
+                                          </div>
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Amount Excl. Tax</span>
+                                            <span className="text-gray-900">{formatCurrency(item.priceBreakdown.amountExcludedTaxes)}</span>
+                                          </div>
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Taxes (7%)</span>
+                                            <span className="text-gray-900">{formatCurrency(item.priceBreakdown.taxes)}</span>
+                                          </div>
+                                          <div className="flex justify-between">
+                                            <span className="text-gray-500">Amount Incl. Tax</span>
+                                            <span className="text-gray-900">{formatCurrency(item.priceBreakdown.amountIncludedTaxes)}</span>
+                                          </div>
+                                          <div className="flex justify-between pt-1 border-t border-gray-300">
+                                            <span className="text-gray-700 font-semibold">Total</span>
+                                            <span className="text-green-600 font-semibold">{formatCurrency(item.priceBreakdown.total)}</span>
+                                          </div>
                                         </div>
                                       </div>
-                                    </div>
-                                  )}
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             </div>
-                          </div>
-                        )}
+                          )
+                        })()}
                       </Card>
                     )
                   })}
@@ -918,7 +1498,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                   </p>
                   {itemSearchTerm && (
                     <Button
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
                       className="mt-4"
                       onClick={() => setItemSearchTerm('')}
@@ -932,12 +1512,16 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
           </Card>
         </TabsContent>
 
-        <TabsContent value="fulfillment" className="space-y-4">
-          {/* Fulfillment Timeline */}
-          <FulfillmentTimeline orderId={order?.id || ""} orderData={order} />
+        <TabsContent value="payments" className="space-y-4">
+          {displayOrder && <PaymentsTab order={displayOrder} />}
         </TabsContent>
 
-        <TabsContent value="delivery" className="space-y-4">
+        <TabsContent value="fulfillment" className="space-y-4">
+          {/* Fulfillment Timeline */}
+          <FulfillmentTimeline orderId={displayOrder?.id || ""} orderData={displayOrder} />
+        </TabsContent>
+
+        {/* <TabsContent value="delivery" className="space-y-4">
           <Card>
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
@@ -959,7 +1543,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                     </div>
                     <div>
                       <p className="text-sm text-enterprise-text-light">Vehicle Type</p>
-                      <Badge variant="outline">{(order as any)?.delivery?.vehicleType || 'N/A'}</Badge>
+                      <Badge variant="ghost">{(order as any)?.delivery?.vehicleType || 'N/A'}</Badge>
                     </div>
                     <div>
                       <p className="text-sm text-enterprise-text-light">License Plate</p>
@@ -990,13 +1574,13 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
               )}
             </CardContent>
           </Card>
-        </TabsContent>
+        </TabsContent> */}
 
         <TabsContent value="tracking" className="space-y-4">
-          <TrackingTab orderId={order?.id || ""} orderData={order} />
+          <TrackingTab orderId={displayOrder?.id || ""} orderData={displayOrder} />
         </TabsContent>
 
-        <TabsContent value="timeline" className="space-y-4">
+        {/* <TabsContent value="timeline" className="space-y-4">
           <Card>
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
@@ -1018,7 +1602,7 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
                           </p>
                         </div>
                         <div className="flex items-center gap-2 mt-1">
-                          <Badge variant="outline" className="text-xs">
+                          <Badge variant="ghost" className="text-xs">
                             {event.status || 'N/A'}
                           </Badge>
                           <span className="text-xs text-enterprise-text-light">by {event.actor || 'System'}</span>
@@ -1035,53 +1619,148 @@ export function OrderDetailView({ order, onClose, orderId }: OrderDetailViewProp
               )}
             </CardContent>
           </Card>
+        </TabsContent> */}
+
+        {/* Notes Tab Content */}
+        <TabsContent value="notes" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-4">
+              <div className="flex items-center justify-between">
+                <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
+                  <StickyNote className="h-5 w-5" />
+                  Notes
+                </CardTitle>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowAddNoteForm(!showAddNoteForm)}
+                  className="flex items-center gap-1"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add Note
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="px-4 sm:px-6">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[150px]">Note Type</TableHead>
+                      <TableHead>Note</TableHead>
+                      <TableHead className="w-[200px]">Created By</TableHead>
+                      <TableHead className="w-[180px]">Created On</TableHead>
+                      <TableHead className="w-[50px]"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {/* Add Form Row - CONDITIONAL (only show when showAddNoteForm is true) */}
+                    {showAddNoteForm && (
+                      <TableRow className="bg-muted/30">
+                        <TableCell className="text-muted-foreground text-sm align-top pt-3">
+                          Order Remark
+                        </TableCell>
+                        <TableCell className="align-top pt-3">
+                          <Textarea
+                            placeholder="Enter your note here..."
+                            value={newNote}
+                            onChange={(e) => setNewNote(e.target.value)}
+                            className="min-h-[80px] resize-none text-sm"
+                            maxLength={500}
+                            autoFocus
+                          />
+                          <div className="flex justify-end gap-2 mt-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setNewNote("")
+                                setShowAddNoteForm(false)
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                            <Button
+                              size="sm"
+                              onClick={handleSaveNote}
+                              disabled={!newNote.trim()}
+                            >
+                              Save Note
+                            </Button>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-sm align-top pt-3">
+                          {currentUser?.email || '-'}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground text-sm align-top pt-3">
+                          {formatNoteTimestamp(new Date())}
+                        </TableCell>
+                        <TableCell className="align-top pt-3">
+                        </TableCell>
+                      </TableRow>
+                    )}
+
+                    {/* Existing Notes */}
+                    {notes.map((note) => (
+                      <TableRow key={note.id}>
+                        <TableCell className="text-sm align-top">
+                          Order Remark
+                        </TableCell>
+                        <TableCell className="align-top">
+                          <p className="text-sm whitespace-pre-wrap">{note.content}</p>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground align-top">
+                          {note.createdBy}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground align-top">
+                          {note.createdAt}
+                        </TableCell>
+                        <TableCell className="align-top">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleDeleteNote(note.id)}
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            title="Delete note"
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+
+                    {/* Empty State */}
+                    {notes.length === 0 && !showAddNoteForm && (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">
+                          <StickyNote className="mx-auto h-12 w-12 text-gray-300 mb-3" />
+                          <p>No notes yet.</p>
+                          <p className="text-xs mt-1">Click &quot;Add Note&quot; to add your first note.</p>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="audit" className="space-y-4">
           <AuditTrailTab
-            orderId={order?.id || ""}
-            orderData={order}
+            orderId={displayOrder?.id || ""}
+            orderData={displayOrder}
           />
         </TabsContent>
-
-        <TabsContent value="notes" className="space-y-4">
-          <Card>
-            <CardHeader className="pb-4">
-              <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
-                <MessageSquare className="h-5 w-5" />
-                Notes & Comments
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="px-4 sm:px-6">
-              {false ? ( // No notes info in API payload
-                <div className="space-y-4">
-                  {(order as any)?.notes?.map((note: any) => (
-                    <div key={note.id} className="border-l-4 border-blue-200 pl-4 py-2">
-                      <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="text-xs">
-                            {note.type || 'General'}
-                          </Badge>
-                          <span className="text-sm font-medium">{note.author || 'N/A'}</span>
-                        </div>
-                        <span className="text-xs text-enterprise-text-light">
-                          {note.timestamp ? new Date(note.timestamp).toLocaleString() : 'N/A'}
-                        </span>
-                      </div>
-                      <p className="text-sm">{note.message || 'No message content.'}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <MessageSquare className="mx-auto h-12 w-12 text-gray-300" />
-                  <p className="mt-4 text-sm text-muted-foreground">No notes or comments for this order.</p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
       </Tabs>
-    </div>
+
+      <CancelOrderDialog
+        open={showCancelDialog}
+        onOpenChange={setShowCancelDialog}
+        orderNo={displayOrder?.order_no || ''}
+        onConfirm={handleCancelOrder}
+        loading={isCancelling}
+      />
+    </div >
   );
 }

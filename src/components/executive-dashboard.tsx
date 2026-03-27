@@ -6,6 +6,7 @@ import { DashboardService } from "@/lib/dashboard-service"
 import { useToast } from "@/components/ui/use-toast"
 import { usePullToRefresh } from "@/hooks/use-pull-to-refresh"
 import { getGMT7Time, formatGMT7DateString, safeParseDate } from "@/lib/utils"
+import { formatCurrencyInt, formatCurrencyShort } from "@/lib/currency-utils"
 import { 
   calculateSLAStatus, 
   filterSLABreach, 
@@ -2407,7 +2408,7 @@ export function ExecutiveDashboard() {
             customer: order.customer?.name || "Customer",
             channel: order.channel,
             status: order.status || "CREATED",
-            total: `฿${(order.total_amount || 0).toLocaleString()}`,
+            total: formatCurrencyInt(order.total_amount),
             date: formatGMT7DateString(orderDate),
           }
         } catch (error) {
@@ -3016,7 +3017,7 @@ export function ExecutiveDashboard() {
       </div>
 
       {/* Tabs */}
-      <div className="mt-12">
+      <div className="mt-8">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <div className="relative" ref={swipeContainerRef}>
           {swipeIndicator}
@@ -3080,29 +3081,29 @@ export function ExecutiveDashboard() {
 
             {/* Critical Alerts */}
             <ChartCard title="Critical Alerts" isLoading={chartsLoading.alerts}>
-              <div className="space-y-4">
+              <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
                 {/* SLA Breach Alerts */}
                 <div>
-                  <h4 className="font-semibold text-red-600 mb-2 flex items-center">
+                  <h4 className="font-semibold text-red-600 mb-1.5 flex items-center">
                     <AlertTriangle className="h-4 w-4 mr-2" />
                     Urgent Orders ({orderAlerts.length})
                   </h4>
                   {orderAlerts.length > 0 ? (
                     <div className="space-y-2">
                       {orderAlerts.map((alert, index) => (
-                        <div key={index} className="flex items-center justify-between p-6 bg-white rounded-xl border border-red-200 shadow-sm hover:shadow-md hover:border-red-300 transition-all duration-200 group">
-                          <div className="space-y-2">
-                            <div className="font-semibold text-base text-gray-900 group-hover:text-red-700 transition-colors">{alert.order_number}</div>
-                            <div className="flex items-center space-x-3 text-sm text-gray-600">
+                        <div key={alert.order_id || alert.order_number || `breach-${index}`} className="flex items-center justify-between p-4 bg-red-700 rounded-xl border border-red-800 shadow-sm hover:shadow-md hover:bg-red-800 hover:border-red-900 transition-all duration-200 group">
+                          <div className="space-y-1">
+                            <div className="font-semibold text-base text-white group-hover:text-white transition-colors">{alert.order_number}</div>
+                            <div className="flex items-center space-x-3 text-sm text-red-100">
                               <span>{alert.customer_name}</span>
                               <ChannelBadge channel={alert.channel} />
                             </div>
                           </div>
                           <div className="text-right space-y-2">
-                            <div className="text-base font-bold text-red-600 group-hover:text-red-700 transition-colors">
+                            <div className="text-base font-bold text-white group-hover:text-white transition-colors">
                               {formatOverTime(alert.elapsed_minutes || 0, alert.target_minutes || 300)}
                             </div>
-                            <div className="text-sm text-gray-500">{alert.location}</div>
+                            <div className="text-sm text-red-100">{alert.location}</div>
                           </div>
                         </div>
                       ))}
@@ -3114,15 +3115,15 @@ export function ExecutiveDashboard() {
 
                 {/* Due Soon Alerts */}
                 <div>
-                  <h4 className="font-semibold text-orange-600 mb-2 flex items-center">
+                  <h4 className="font-semibold text-orange-600 mb-1.5 flex items-center">
                     <Clock className="h-4 w-4 mr-2" />
                     Due Soon ({approachingSla.length})
                   </h4>
                   {approachingSla.length > 0 ? (
                     <div className="space-y-2">
                       {approachingSla.slice(0, 6).map((alert, index) => (
-                        <div key={index} className="flex items-center justify-between p-6 bg-white rounded-xl border border-amber-200 shadow-sm hover:shadow-md hover:border-amber-300 transition-all duration-200 group">
-                          <div className="space-y-2">
+                        <div key={alert.order_id || alert.order_number || `approaching-${index}`} className="flex items-center justify-between p-4 bg-white rounded-xl border border-amber-200 shadow-sm hover:shadow-md hover:border-amber-300 transition-all duration-200 group">
+                          <div className="space-y-1">
                             <div className="font-semibold text-base text-gray-900 group-hover:text-amber-700 transition-colors">{alert.order_number}</div>
                             <div className="flex items-center text-sm text-gray-600">
                               <ChannelBadge channel={alert.channel} />
@@ -3214,7 +3215,7 @@ export function ExecutiveDashboard() {
                           <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Orders</div>
                         </div>
                         <div className="text-center space-y-1">
-                          <div className="text-xl font-bold text-green-600">฿{((currentHourData.revenue || 0) / 1000000).toFixed(1)}M</div>
+                          <div className="text-xl font-bold text-green-600">{formatCurrencyShort(currentHourData.revenue || 0, 1)}</div>
                           <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">Revenue</div>
                         </div>
                       </>
@@ -3230,16 +3231,18 @@ export function ExecutiveDashboard() {
                       margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis 
-                        dataKey="hour" 
+                      <XAxis
+                        dataKey="hour"
                         tick={{ fontSize: 12 }}
+                        angle={0}
                         interval={1}
+                        height={60}
                       />
                       <YAxis yAxisId="left" />
                       <YAxis yAxisId="right" orientation="right" />
                       <Tooltip
                         formatter={(value, name) => [
-                          name === 'revenue' ? `฿${(Number(value) / 1000000).toFixed(1)}M` : value,
+                          name === 'revenue' ? formatCurrencyShort(Number(value), 1) : value,
                           name === 'orders' ? 'Orders' : 'Revenue'
                         ]}
                         labelFormatter={(hour) => `Time: ${hour}`}
@@ -3260,7 +3263,13 @@ export function ExecutiveDashboard() {
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={dailyOrders}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="date" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 12 }}
+                        angle={-45}
+                        textAnchor="end"
+                        height={80}
+                      />
                       <YAxis />
                       <Tooltip />
                       <Legend />
@@ -3281,7 +3290,7 @@ export function ExecutiveDashboard() {
         </TabsContent>
 
         {/* Fulfillment Tab */}
-        <TabsContent value="fulfillment" className="space-y-4 mt-6">
+        <TabsContent value="fulfillment" className="space-y-4 mt-8">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Fulfillment by Branch */}
             <ChartCard title="Fulfillment by Branch" isLoading={chartsLoading.fulfillmentByBranch}>
@@ -3290,7 +3299,12 @@ export function ExecutiveDashboard() {
                   fulfillmentByBranch.map((branch, index) => (
                     <div key={index} className="p-6 bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200 space-y-4 group">
                       <div className="flex justify-between items-center">
-                        <span className="text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">{branch.branch}</span>
+                        <span
+                          className="text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors truncate max-w-[200px] block"
+                          title={branch.branch}
+                        >
+                          {branch.branch}
+                        </span>
                         <div className="text-right">
                           <div className="text-xl font-bold text-green-600">{branch.rate.toFixed(1)}%</div>
                           <div className="text-sm text-gray-500">
@@ -3321,12 +3335,17 @@ export function ExecutiveDashboard() {
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={channelPerformance}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="channel" />
+                      <XAxis
+                        dataKey="channel"
+                        tick={{ fontSize: 12 }}
+                        angle={0}
+                        height={60}
+                      />
                       <YAxis yAxisId="left" />
                       <YAxis yAxisId="right" orientation="right" />
                       <Tooltip
                         formatter={(value, name) => [
-                          name === 'revenue' ? `฿${(Number(value) / 1000000).toFixed(1)}M` :
+                          name === 'revenue' ? formatCurrencyShort(Number(value), 1) :
                           name === 'sla_rate' ? `${Number(value).toFixed(1)}%` : value,
                           name === 'orders' ? 'Orders' :
                           name === 'revenue' ? 'Revenue' : 'SLA Rate'
@@ -3383,7 +3402,7 @@ export function ExecutiveDashboard() {
                           </div>
                         </div>
                         <div className="text-right">
-                          <div className="text-2xl font-bold text-green-600 group-hover:text-green-700 transition-colors">฿{product.revenue.toLocaleString()}</div>
+                          <div className="text-2xl font-bold text-green-600 group-hover:text-green-700 transition-colors">{formatCurrencyInt(product.revenue)}</div>
                           <div className="text-sm font-medium text-gray-500">Revenue</div>
                         </div>
                       </div>
@@ -3418,7 +3437,7 @@ export function ExecutiveDashboard() {
                           <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                         ))}
                       </Pie>
-                      <Tooltip formatter={(value) => [`฿${(value as number)?.toLocaleString() ?? '0'}`, 'Revenue']} />
+                      <Tooltip formatter={(value) => [formatCurrencyInt(value as number), 'Revenue']} />
                     </PieChart>
                   </ResponsiveContainer>
                 ) : (
